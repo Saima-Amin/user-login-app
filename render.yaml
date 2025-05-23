@@ -1,13 +1,5 @@
-runtime: python39
-env: standard
+runtime: python310
 
-env_variables:
-  FLASK_SECRET_KEY: "your-secret-key"
-  INSTANCE_CONNECTION_NAME: "your-project-id:region:instance-name"
-  DB_USER: "your-db-user"
-  DB_PASS: "your-db-password"
-  DB_NAME: "your-database-name"
-
-handlers:
+handlers: 
 - url: /.*
   script: auto
