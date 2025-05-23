@@ -2,53 +2,50 @@ from flask import Flask, request, jsonify, session, render_template, redirect, u
 from flask_bcrypt import Bcrypt
 import pymysql
 import os
-from google.cloud.sql.connector import Connector # type: ignore
+from dotenv import load_dotenv
+import re
+
+# Load environment variables from .env file
+load_dotenv()
 
 app = Flask(__name__)
 app.secret_key = os.environ.get('FLASK_SECRET_KEY', 'your-secret-key')
 bcrypt = Bcrypt(app)
 
-# Initialize Cloud SQL Connector
-connector = Connector()
-
+# Establish a MySQL connection
 def get_db_connection():
-    conn = connector.connect(
-        os.environ['INSTANCE_CONNECTION_NAME'],
-        "pymysql",
-        user=os.environ['DB_USER'],
-        password=os.environ['DB_PASS'],
-        db=os.environ['DB_NAME']
-    )
-    return conn
+    try:
+        conn = pymysql.connect(
+            host=os.environ.get('DB_HOST', 'localhost'),
+            user=os.environ.get('DB_USER', 'your_username'),
+            password=os.environ.get('DB_PASS', 'your_password'),
+            db=os.environ.get('DB_NAME', 'your_database'),
+            port=int(os.environ.get('DB_PORT', 3306)),  # Add port, default to 3306
+            charset='utf8mb4',
+            cursorclass=pymysql.cursors.DictCursor,  # Use DictCursor for easier data access
+            ssl={'ca': 'ca.pem'}  # Path to the CA certificate
+        )
+        return conn
+    except pymysql.MySQLError as e:
+        raise Exception(f"Database connection failed: {str(e)}")
 
 # Create users table if not exists
 def init_db():
-    conn = get_db_connection()
-    with conn.cursor() as cursor:
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS users (
-                id INT AUTO_INCREMENT PRIMARY KEY,
-                username VARCHAR(30) UNIQUE,
-                password VARCHAR(100),
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-        """)
-    conn.commit()
-    conn.close()
-
-# Create MySQL user
-def create_mysql_user(username, password):
     try:
-        conn = get_db_connection()
-        with conn.cursor() as cursor:
-            cursor.execute(f"CREATE USER '{username}'@'%' IDENTIFIED BY '{password}'")
-            cursor.execute(f"GRANT SELECT, INSERT, UPDATE ON {os.environ['DB_NAME']}.* TO '{username}'@'%'")
-        conn.commit()
-        conn.close()
-        return True
+        with get_db_connection() as conn:
+            with conn.cursor() as cursor:
+                cursor.execute("""
+                    CREATE TABLE IF NOT EXISTS users (
+                        id INT AUTO_INCREMENT PRIMARY KEY,
+                        username VARCHAR(30) UNIQUE,
+                        password VARCHAR(100),
+                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    )
+                """)
+            conn.commit()
     except Exception as e:
-        print(f"Error creating MySQL user: {e}")
-        return False
+        print(f"Error initializing database: {str(e)}")
+        raise
 
 # Render registration page
 @app.route('/register', methods=['GET'])
@@ -61,37 +58,36 @@ def register():
     username = request.form.get('username')
     password = request.form.get('password')
 
-    if not username or not password:
-        flash('Username and password required', 'error')
+    # Validate username: alphanumeric, 3-30 characters
+    if not username or not re.match(r'^[a-zA-Z0-9]{3,30}$', username):
+        flash('Username must be 3-30 characters and alphanumeric', 'error')
+        return redirect(url_for('register_page'))
+
+    # Validate password: at least 8 characters
+    if not password or len(password) < 8:
+        flash('Password must be at least 8 characters', 'error')
         return redirect(url_for('register_page'))
 
     hashed_password = bcrypt.generate_password_hash(password).decode('utf-8')
 
     try:
-        conn = get_db_connection()
-        with conn.cursor() as cursor:
-            cursor.execute("SELECT * FROM users WHERE username = %s", (username,))
-            if cursor.fetchone():
-                flash('Username already exists', 'error')
-                return redirect(url_for('register_page'))
+        with get_db_connection() as conn:
+            with conn.cursor() as cursor:
+                cursor.execute("SELECT * FROM users WHERE username = %s", (username,))
+                if cursor.fetchone():
+                    flash('Username already exists', 'error')
+                    return redirect(url_for('register_page'))
 
-            cursor.execute(
-                "INSERT INTO users (username, password) VALUES (%s, %s)",
-                (username, hashed_password)
-            )
-            conn.commit()
-
-            if create_mysql_user(username, password):
+                cursor.execute(
+                    "INSERT INTO users (username, password) VALUES (%s, %s)",
+                    (username, hashed_password)
+                )
+                conn.commit()
                 flash('Registration successful! You can now log in.', 'success')
                 return redirect(url_for('login_page'))
-            else:
-                flash('Failed to create MySQL user', 'error')
-                return redirect(url_for('register_page'))
     except Exception as e:
         flash(f'Error: {str(e)}', 'error')
         return redirect(url_for('register_page'))
-    finally:
-        conn.close()
 
 # Render login page
 @app.route('/login', methods=['GET'])
@@ -109,22 +105,20 @@ def login():
         return redirect(url_for('login_page'))
 
     try:
-        conn = get_db_connection()
-        with conn.cursor() as cursor:
-            cursor.execute("SELECT password FROM users WHERE username = %s", (username,))
-            user = cursor.fetchone()
-            if user and bcrypt.check_password_hash(user[0], password):
-                session['username'] = username
-                flash('Login successful!', 'success')
-                return redirect(url_for('home'))
-            else:
-                flash('Invalid credentials', 'error')
-                return redirect(url_for('login_page'))
+        with get_db_connection() as conn:
+            with conn.cursor() as cursor:
+                cursor.execute("SELECT password FROM users WHERE username = %s", (username,))
+                user = cursor.fetchone()
+                if user and bcrypt.check_password_hash(user['password'], password):
+                    session['username'] = username
+                    flash('Login successful!', 'success')
+                    return redirect(url_for('home'))
+                else:
+                    flash('Invalid credentials', 'error')
+                    return redirect(url_for('login_page'))
     except Exception as e:
         flash(f'Error: {str(e)}', 'error')
         return redirect(url_for('login_page'))
-    finally:
-        conn.close()
 
 # Home page after login
 @app.route('/')
@@ -134,7 +128,6 @@ def home():
     return redirect(url_for('login_page'))
 
 # Initialize database on startup
-init_db()
-
 if __name__ == '__main__':
+    init_db()
     app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 8080)))
